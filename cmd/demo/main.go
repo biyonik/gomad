@@ -1,45 +1,37 @@
 package main
 
-import (
-	"fmt"
-
-	"github.com/biyonik/gomad/internal/platform"
-	"github.com/biyonik/gomad/internal/platform/windows"
-)
+import webview "github.com/webview/webview_go"
 
 func main() {
-	window := windows.NewWindow()
+	w := webview.New(true)
+	defer w.Destroy()
 
-	window.SetTitle("GOMAD - Klavye ve Konum Testi")
-	window.SetSize(800, 600)
+	w.SetTitle("GOMAD WebView Testi")
+	w.SetSize(800, 600, webview.HintNone)
 
-	// Klavye event'leri
-	window.OnKeyDown(func(keyCode int) {
-		fmt.Printf("Tuş basıldı: %d\n", keyCode)
+	w.SetHtml(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    height: 100vh;
+                    margin: 0;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white;
+                }
+                h1 { font-size: 3em; }
+            </style>
+        </head>
+        <body>
+            <h1>🚀 GOMAD WebView!</h1>
+        </body>
+        </html>
+    `)
 
-		// ESC = 27, pencereyi kapat
-		if keyCode == 27 {
-			fmt.Println("ESC basıldı, kapatılıyor...")
-			window.Close()
-		}
-
-		// C = 67, pencereyi ortala
-		if keyCode == 67 {
-			fmt.Println("Pencere ortalanıyor...")
-			window.Center()
-		}
-	})
-
-	window.OnClick(func(x, y int, button platform.MouseButton) {
-		fmt.Printf("Tıklama: (%d, %d)\n", x, y)
-	})
-
-	window.OnClose(func() {
-		fmt.Println("Hoşçakal! 👋")
-	})
-
-	fmt.Println("GOMAD başlıyor...")
-	fmt.Println("C = Ortala, ESC = Kapat")
-	window.Run()
-	fmt.Println("GOMAD kapandı.")
+	w.Run()
 }
