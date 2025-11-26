@@ -79,6 +79,12 @@ var (
 	// procSetWindowPos -> Pencere boyut ve pozisyonunu günceller.
 	procSetWindowPos = user32.NewProc("SetWindowPos")
 
+	// procGetWindowRect -> Belirtilen pencerenin sınırlayıcı dikdörtgeninin sınırlarını alır
+	procGetWindowRect = user32.NewProc("GetWindowRect")
+
+	// procGetSystemMetrics -> Windows API'sinden sistem ölçümlerini veya sistem yapılandırma ayarlarını alır.
+	procGetSystemMetrics = user32.NewProc("GetSystemMetrics")
+
 	// ==========================
 	// kernel32.dll Fonksiyonları
 	// ==========================

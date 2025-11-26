@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/biyonik/gomad/internal/platform"
 	"github.com/biyonik/gomad/internal/platform/windows"
@@ -11,46 +10,36 @@ import (
 func main() {
 	window := windows.NewWindow()
 
-	window.SetTitle("GOMAD - Mouse'u hareket ettir!")
+	window.SetTitle("GOMAD - Klavye ve Konum Testi")
 	window.SetSize(800, 600)
 
-	// Throttle için son güncelleme zamanı
-	var lastUpdate time.Time
-	throttle := 50 * time.Millisecond // 50ms = saniyede max 20 güncelleme
+	// Klavye event'leri
+	window.OnKeyDown(func(keyCode int) {
+		fmt.Printf("Tuş basıldı: %d\n", keyCode)
 
-	// Mouse hareket edince başlığı güncelle (throttled)
-	window.OnMouseMove(func(x, y int) {
-		now := time.Now()
-		if now.Sub(lastUpdate) < throttle {
-			return // Çok erken, atla
+		// ESC = 27, pencereyi kapat
+		if keyCode == 27 {
+			fmt.Println("ESC basıldı, kapatılıyor...")
+			window.Close()
 		}
-		lastUpdate = now
 
-		title := fmt.Sprintf("GOMAD - Mouse: (%d, %d)", x, y)
-		window.SetTitle(title)
+		// C = 67, pencereyi ortala
+		if keyCode == 67 {
+			fmt.Println("Pencere ortalanıyor...")
+			window.Center()
+		}
 	})
 
-	// Click'te hemen güncelle (throttle yok, click nadir)
 	window.OnClick(func(x, y int, button platform.MouseButton) {
-		buttonName := "?"
-		switch button {
-		case platform.MouseButtonLeft:
-			buttonName = "SOL TIKLAMA"
-		case platform.MouseButtonRight:
-			buttonName = "SAĞ TIKLAMA"
-		case platform.MouseButtonMiddle:
-			buttonName = "ORTA TIKLAMA"
-		}
-		title := fmt.Sprintf("GOMAD - %s: (%d, %d)", buttonName, x, y)
-		window.SetTitle(title)
+		fmt.Printf("Tıklama: (%d, %d)\n", x, y)
 	})
 
 	window.OnClose(func() {
-		fmt.Println("Pencere kapanıyor... Hoşçakal! 👋")
+		fmt.Println("Hoşçakal! 👋")
 	})
 
 	fmt.Println("GOMAD başlıyor...")
-	fmt.Println("Mouse'u pencere içinde hareket ettir ve başlığa bak!")
+	fmt.Println("C = Ortala, ESC = Kapat")
 	window.Run()
 	fmt.Println("GOMAD kapandı.")
 }

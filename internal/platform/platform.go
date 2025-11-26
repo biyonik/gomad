@@ -62,6 +62,25 @@ type Window interface {
 	// x,y tıklanan konumu, button ise hangi fare tuşunun kullanıldığını belirtir.
 	OnClick(callback func(x, y int, button MouseButton))
 
+	// OnKeyDown, klavyeden bir tuşa basıldığında tetiklenen event’i yakalar.
+	// keyCode parametresi ile hangi tuşa basıldığı bilgisi sağlanır.
+	OnKeyDown(callback func(keyCode int))
+
+	// OnKeyUp, klavyeden basılan tuş bırakıldığında tetiklenen event’i yakalar.
+	// keyCode parametresi ile hangi tuşun bırakıldığı bilgisi sağlanır.
+	OnKeyUp(callback func(keyCode int))
+
+	// SetPosition, pencerenin ekran üzerindeki konumunu belirler.
+	// x ve y parametreleri ile sol üst köşenin koordinatları ayarlanır.
+	SetPosition(x, y int)
+
+	// GetPosition , pencerenin mevcut ekran konumunu döndürür.
+	// Dönen x ve y değerleri sol üst köşenin koordinatlarını temsil eder.
+	GetPosition() (x, y int)
+
+	// Center, pencereyi ekrana ortalar
+	Center()
+
 	// Run, pencerenin ana event-loop sürecini başlatır.
 	// UI etkileşimi canlı kalır, eventler işlenir, life-cycle sürdürülür.
 	Run()

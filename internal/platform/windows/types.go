@@ -125,6 +125,8 @@ const (
 	WM_RBUTTONUP   = 0x0205
 	WM_MBUTTONDOWN = 0x0207
 	WM_MBUTTONUP   = 0x0208
+	WM_KEYDOWN     = 0x0100
+	WM_KEYUP       = 0x0101
 )
 
 /*
@@ -145,6 +147,17 @@ const (
 
 /*
 =========================
+Sistem Ölçüm Sabitleri
+=========================
+Ekran genişliği, yüksekliği gibi sistem bilgilerini almak için kullanılır.
+*/
+const (
+	SM_CXSCREEN = 0 // Ekran genişliği
+	SM_CYSCREEN = 1 // Ekran yüksekliği
+)
+
+/*
+=========================
 Ek UI Sabitleri
 =========================
 Sistem brush ID’leri, cursor, show/hide flag’leri vb.
@@ -160,7 +173,7 @@ const (
 	SW_SHOW = 5
 	SW_HIDE = 0
 
-	CW_USEDEFAULT = ^0x7FFFFFFF // Varsayılan pencere pozisyonu
+	CW_USEDEFAULT = 0x80000000 // Varsayılan pencere pozisyonu
 )
 
 /*
