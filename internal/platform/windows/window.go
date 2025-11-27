@@ -1,36 +1,46 @@
 //go:build windows
-// +build windows
 
 package windows
 
 /*
-===========================================================================================================
-🪟 Windows Native Window — Olay Döngüsü, Mesaj İşleme, Etkileşim Sistemi (Win32 API Tabanlı)
-===========================================================================================================
+============================================================================================
+🪟 Windows Platformu — Native Pencere Yönetimi (Giriş, Yaşam Döngüsü, Olaylar)
+============================================================================================
 
-Bu dosya, Windows işletim sistemine özgü gerçek bir grafik pencere oluşturmayı,
-çalıştırmayı, mesaj döngüsünü yönetmeyi ve kullanıcı etkileşimlerini yakalamayı sağlayan
-tam teşekküllü `Window` implementasyonunu içerir.
+Bu dosya, GOMAD uygulamasının Windows altında çalışan, gerçek işletim sistemi pencere
+yapısını temsil eden ve yöneten kodun metaforik kalbini taşır. Burada yalnızca teknik işlevler
+tanımlanmaz; aynı zamanda "pencerenin ruhu" vardır — hangi olayların nasıl aktığı, bir pencerenin
+nasıl doğup yaşadığı ve nasıl veda ettiğine dair kurallar seti.
 
-Buradaki yapı yalnızca UI oluşturmak için değil; Win32 API’nin en alt seviyesinde
-pencere yaşam döngüsünü kontrol etmek için tasarlanmıştır. Bu nedenle:
+Neyi yapıyoruz?
+- Windows'un Win32 API'si ile konuşarak gerçek native bir pencere oluşturuyoruz.
+- Pencere sınıfını sisteme kaydediyor, pencereyi yaratıyor, global bir kayıt defterinde
+  saklıyor, ve Windows mesaj döngüsünü (message loop) yönetiyoruz.
+- Kullanıcı etkileşimlerini (taşıma, boyutlandırma, odak değişimi, kapatma) Go tarafına
+  callback'ler aracılığıyla iletiyoruz.
 
-📌 `CreateWindowEx` ile *gerçek native pencere* oluşturulur
-📌 `GetMessage/DispatchMessage` ile WinAPI event loop aktif tutulur
-📌 `wndProc` ile mouse, kapatma, destroy gibi **ham mesajlar yakalanır**
-📌 Üst seviye projeler soyutlama katmanında platform bağımsız kullanabilir
+Nasıl yapıyoruz?
+- `WNDCLASSEX`, `CreateWindowEx`, `GetMessage`, `DispatchMessage` gibi Win32 yapı/fonksiyon
+  çağrılarını (wrapper'lar aracılığıyla) kullanıyoruz.
+- Windows callback'ı (wndProc) global bir registry'ye erişerek ilgili Go `Window` örneğine
+  ulaşır; böylece OS tarafındaki ham olaylar güvenli bir şekilde Go tarafındaki metodlara
+  yönlendirilir.
+- Concurrency (eşzamanlılık) için `sync.RWMutex` kullanılarak state ve callback atamaları
+  güvence altına alınır.
 
-Bu sınıfın amacı; modern Go kodunun, WinAPI’nin karmaşık mesaj sistemine doğrudan
-dokunmadan pencere oluşturabilmesini sağlamaktır. Kodun içinde:
-- Mutex ile thread-safety korunur
-- Callback fonksiyonları ile kullanıcı etkileşimi üst seviyeye taşınır
-- WM_XXXX mesajları manuel işlenerek gerçek zamanlı input elde edilir
-- High-level platform arayüzü ile low-level Win32 API kusursuz biçimde birleşir
+Neden böyle?
+- Windows'un mesaj tabanlı yapısı, tek bir global C callback fonksiyonu ile çalışmayı gerektirir.
+  Go nesnelerini, metodlarını doğrudan bu callback içinde çağırmak mümkün olmadığından bir
+  registry gerekir.
+- Bu yaklaşım platform bağımsız bir `platform.Window` arayüzünü doldurur; üst katmanlar OS
+  farklılıklarıyla uğraşmadan pencereleri yönetir.
+- Tasarım, hem "uygulama mantığının" pencereden ayrılmasını sağlar hem de test edilebilirlik,
+  bakım ve genişletilebilirlik getirir.
 
-Bu sınıfa “Görsel UI’nın kalbi” demek abartı değildir — çünkü sistem her input, her
-hareket, her tıklama, her kapanma talimatını burada duyup işler.
-Event geçmezse pencere hareket etmez, mesaj okunmazsa yazılım donar.
-Burası pencerenin solunum borusu gibidir; kesilirse tüm UI ölür.
+Yapının sınırları:
+- Bu dosya doğrudan Win32 ile konuşur; diğer platformlarda farklı implementasyonlar gereklidir.
+- Bazı fonksiyonlar (ör. stil güncelleme) TODO olarak bırakılmış; canlı stil değişiklikleri
+  için ek Win32 çağrıları gereklidir.
 
 ----------------------------------------------------------------------------------------
 @author   Ahmet ALTUN
@@ -41,6 +51,7 @@ Burası pencerenin solunum borusu gibidir; kesilirse tüm UI ölür.
 */
 
 import (
+	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -48,309 +59,458 @@ import (
 	"github.com/biyonik/gomad/internal/platform"
 )
 
-// Window, native Win32 penceresini temsil eden yapıdır.
-// hwnd → gerçek pencere handle'ı
-// title,width,height → pencerenin temel özellikleri
-// onClose,onMouseMove,onClick → harici callback bağlantıları (event binding)
-// mu → veri bütünlüğü için kilit mekanizması (thread-safe çalışma)
+// Ensure Window implements platform.Window
+// -----------------------------------------------------------------------------
+// Derleme zamanı kontrolü: Bu satır, Window struct'ının platform.Window
+// arayüzünü implement ettiğini garanti eder. Eğer arayüz sözleşmesi bozulursa
+// derleme hatası verecektir.
+var _ platform.Window = (*Window)(nil)
+
+// Window represents a Windows native window.
+// platform.Window interface'ini implement eder.
+// -----------------------------------------------------------------------------
+// Window yapısı, bir native Windows penceresinin tüm durum ve callback'lerini
+// tutar. Burada tutulan alanlar:
+//
+// - hwnd, hInstance: native handle'lar (WinAPI ile etkileşim için)
+// - className, title: pencere tanımlama bilgileri
+// - onClose, onResize, onMove, onFocus, onBlur: dışarıdan bağlanacak callback'ler
+// - resizable, closed: durum bayrakları
+// - mu: concurrent erişimler için RWMutex
+//
+// Neden böyle yapılandırdık?
+// - Native handle'lar ile doğrudan çalışma zorunluluğu vardır.
+// - Callback'ler event-driven mimari sağlayarak UI katmanını uygulama mantığından ayırır.
+// - Mutex ile paralel atamalar güvenli hale gelir.
 type Window struct {
-	hwnd   HWND
-	title  string
-	width  int
-	height int
+	hwnd      syscall.Handle
+	hInstance syscall.Handle
+	className string
+	title     string
 
-	onClose     func()
-	onMouseMove func(x, y int)
-	onClick     func(x, y int, button platform.MouseButton)
-	onKeyDown   func(keyCode int)
-	onKeyUp     func(keyCode int)
+	// Callbacks
+	onClose  func() bool
+	onResize func(width, height int)
+	onMove   func(x, y int)
+	onFocus  func()
+	onBlur   func()
 
-	mu sync.Mutex
+	// State
+	resizable bool
+	closed    bool
+	mu        sync.RWMutex
 }
 
-// activeWindow, Windows mesaj işleyicisinin hangi pencereye bağlı olduğunu saklar.
-// WinAPI tek global wndProc çalıştırır → aktif pencere buradan yönlendirilir.
-var activeWindow *Window
+// Global window registry - wndProc'tan window'a ulaşmak için
+// Windows callback'leri Go struct'larına erişemez, bu yüzden global map gerekli
+// -----------------------------------------------------------------------------
+// windowRegistry, native HWND/Handle -> *Window eşlemesini tutar. wndProc
+// callback'ı bu map aracılığıyla ilgili Go nesnesine ulaşır. Erişim için
+// registryMu ile koruma sağlanır.
+var (
+	windowRegistry = make(map[syscall.Handle]*Window)
+	registryMu     sync.RWMutex
+)
 
-// NewWindow, default değerlerle yeni bir native pencere örneği oluşturur.
-// Başlık verilir, genişlik-yükseklik atanır, ancak henüz OS tarafında oluşmaz.
-func NewWindow() *Window {
-	return &Window{
-		title:  "GOMAD Window",
-		width:  800,
-		height: 600,
+// NewWindow creates a new native window.
+// -----------------------------------------------------------------------------
+// Yeni bir Window örneği oluşturur, sınıfı register eder ve native pencereyi yaratır.
+// Parametre: cfg (platform.WindowConfig) — pencere oluşturma ayarları.
+// Döner: (*Window, error)
+//
+// İş akışı:
+// 1. runtime.LockOSThread ile Windows'un main-thread kısıtlamasına uyulur.
+// 2. GetModuleHandle ile instance elde edilir.
+// 3. registerClass ile pencere sınıfı sisteme register edilir (varsa hata yutulur).
+// 4. CreateWindowEx çağrısıyla native pencere oluşturulur ve registry'ye eklenir.
+// 5. Eğer cfg.Centered ise pencere ekran ortasına taşınır.
+func NewWindow(cfg platform.WindowConfig) (*Window, error) {
+	// Windows'un main thread'de çalışmasını garanti et
+	runtime.LockOSThread()
+
+	hInstance := GetModuleHandle(nil)
+
+	w := &Window{
+		hInstance: hInstance,
+		className: "GomadWindowClass",
+		title:     cfg.Title,
+		resizable: cfg.Resizable,
 	}
+
+	// Window class'ı register et
+	if err := w.registerClass(); err != nil {
+		return nil, err
+	}
+
+	// Style hesapla
+	style := uint32(WS_OVERLAPPEDWINDOW)
+	if !cfg.Resizable {
+		style &^= WS_THICKFRAME | WS_MAXIMIZEBOX
+	}
+
+	// Pencereyi oluştur
+	hwnd, err := CreateWindowEx(
+		0,
+		UTF16PtrFromString(w.className),
+		UTF16PtrFromString(cfg.Title),
+		style,
+		CW_USEDEFAULT, CW_USEDEFAULT,
+		int32(cfg.Width), int32(cfg.Height),
+		0, 0, hInstance,
+		unsafe.Pointer(w),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	w.hwnd = hwnd
+
+	// Global registry'e ekle
+	registryMu.Lock()
+	windowRegistry[hwnd] = w
+	registryMu.Unlock()
+
+	// Center if requested
+	if cfg.Centered {
+		w.Center()
+	}
+
+	return w, nil
 }
 
-// SetTitle, pencerenin başlığını değiştirir.
-// Win32 handle oluşmuşsa anında OS tarafına yansır.
+// registerClass registers the window class with Windows.
+// -----------------------------------------------------------------------------
+// WNDCLASSEX doldurularak RegisterClassEx çağrılır. Bu işlem, CreateWindowEx
+// ile pencere yaratılmadan önce sınıf meta bilgisinin sisteme bildirilmesini sağlar.
+// Eğer class zaten register edilmişse bu durum hata kabul edilmemektedir.
+func (w *Window) registerClass() error {
+	wc := WNDCLASSEX{
+		CbSize:        uint32(unsafe.Sizeof(WNDCLASSEX{})),
+		Style:         0,
+		LpfnWndProc:   syscall.NewCallback(wndProc),
+		HInstance:     w.hInstance,
+		HCursor:       LoadCursor(0, MakeIntResource(IDC_ARROW)),
+		HbrBackground: syscall.Handle(6), // COLOR_WINDOW + 1
+		LpszClassName: UTF16PtrFromString(w.className),
+	}
+
+	_, err := RegisterClassEx(&wc)
+	// Class zaten register edilmiş olabilir, hata değil
+	if err != nil && err.Error() != "Class already exists." {
+		return err
+	}
+	return nil
+}
+
+// wndProc is the window procedure callback.
+// Windows her mesaj gönderdiğinde bu fonksiyon çağrılır.
+// -----------------------------------------------------------------------------
+// Bu fonksiyon doğrudan Win32 tarafından çağrılır. Global registry'den
+// ilgili *Window örneğini alır ve mesaj türüne göre uygun callback'i tetikler.
+// Mesaj işleme sırasında eğer window bulunamazsa DefWindowProc çağrılır.
+//
+// Önemli: Bu fonksiyon yüksek performanslı ve minimal olmalıdır — ağır işler
+// burada yapılmamalıdır; sadece event yönlendirmesi yapılır.
+func wndProc(hwnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
+	// Window'u registry'den al
+	registryMu.RLock()
+	w, ok := windowRegistry[hwnd]
+	registryMu.RUnlock()
+
+	if !ok {
+		return DefWindowProc(hwnd, msg, wParam, lParam)
+	}
+
+	switch msg {
+	case WM_CLOSE:
+		// onClose callback varsa çağır
+		if w.onClose != nil {
+			if !w.onClose() {
+				return 0 // Kapanmayı engelle
+			}
+		}
+		DestroyWindow(hwnd)
+		return 0
+
+	case WM_DESTROY:
+		// Registry'den kaldır
+		registryMu.Lock()
+		delete(windowRegistry, hwnd)
+		registryMu.Unlock()
+
+		w.mu.Lock()
+		w.closed = true
+		w.mu.Unlock()
+
+		PostQuitMessage(0)
+		return 0
+
+	case WM_SIZE:
+		if w.onResize != nil {
+			width := int(LOWORD(lParam))
+			height := int(HIWORD(lParam))
+			w.onResize(width, height)
+		}
+		return 0
+
+	case WM_MOVE:
+		if w.onMove != nil {
+			x := int(LOWORD(lParam))
+			y := int(HIWORD(lParam))
+			w.onMove(x, y)
+		}
+		return 0
+
+	case WM_SETFOCUS:
+		if w.onFocus != nil {
+			w.onFocus()
+		}
+		return 0
+
+	case WM_KILLFOCUS:
+		if w.onBlur != nil {
+			w.onBlur()
+		}
+		return 0
+	}
+
+	return DefWindowProc(hwnd, msg, wParam, lParam)
+}
+
+// ==================== Lifecycle ====================
+
+// Show makes the window visible.
+// -----------------------------------------------------------------------------
+// Window görünür hale getirilir. WinAPI ShowWindow + UpdateWindow çağrıları
+// ile pencere ekranda görüntülenir ve arayüz güncellemesi tetiklenir.
+func (w *Window) Show() {
+	ShowWindow(w.hwnd, SW_SHOW)
+	UpdateWindow(w.hwnd)
+}
+
+// Hide makes the window invisible.
+// -----------------------------------------------------------------------------
+// Pencereyi destroy etmeden gizler. Görev geçici olarak kullanıcıdan saklanmak
+// istendiğinde kullanılır.
+func (w *Window) Hide() {
+	ShowWindow(w.hwnd, SW_HIDE)
+}
+
+// Close destroys the window.
+// -----------------------------------------------------------------------------
+// Pencereyi yok eder. Eğer pencere zaten kapatıldıysa fonksiyon erken döner.
+// DestroyWindow işletim sistemi kaynaklarını serbest bırakır; WM_DESTROY ile
+// takip eden cleanup süreçleri başlar.
+func (w *Window) Close() {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return
+	}
+	w.mu.Unlock()
+
+	DestroyWindow(w.hwnd)
+}
+
+// ==================== Properties ====================
+
+// SetTitle sets the window title.
+// -----------------------------------------------------------------------------
+// Pencere başlığını günceller. Hem local cache (w.title) güncellenir hem de
+// WinAPI SetWindowText wrapper'ı ile native pencereye yazılır.
 func (w *Window) SetTitle(title string) {
 	w.mu.Lock()
 	w.title = title
 	w.mu.Unlock()
 
-	if w.hwnd != 0 {
-		_, _, err := procSetWindowText.Call(
-			uintptr(w.hwnd),
-			uintptr(unsafe.Pointer(StringToUTF16Ptr(title))),
-		)
-		if err != nil {
-			return
-		}
-	}
+	SetWindowText(w.hwnd, title)
 }
 
-// SetSize, pencerenin genişlik-yüksekliğini günceller.
-// Pencere oluşturulmuşsa SetWindowPos ile Windows API'ye yansıtılır.
+// GetTitle returns the window title.
+// -----------------------------------------------------------------------------
+// Pencere başlığını döner. Bu implementasyon native GetWindowText çağrısını
+// kullanır; alternatif olarak önbelleğe alınan w.title da tercih edilebilir.
+func (w *Window) GetTitle() string {
+	return GetWindowText(w.hwnd)
+}
+
+// SetSize sets the window size.
+// -----------------------------------------------------------------------------
+// Pencerenin client area boyutunu ayarlar. Mevcut pencere konumu korunur,
+// sadece genişlik ve yükseklik değiştirilir.
 func (w *Window) SetSize(width, height int) {
-	w.mu.Lock()
-	w.width = width
-	w.height = height
-	w.mu.Unlock()
-
-	if w.hwnd != 0 {
-		const SWP_NOMOVE = 0x0002
-		const SWP_NOZORDER = 0x0004
-		procSetWindowPos.Call(
-			uintptr(w.hwnd),
-			0,
-			0, 0,
-			uintptr(width), uintptr(height),
-			SWP_NOMOVE|SWP_NOZORDER,
-		)
-	}
+	var rect RECT
+	GetWindowRect(w.hwnd, &rect)
+	MoveWindow(w.hwnd, rect.Left, rect.Top, int32(width), int32(height), true)
 }
 
-// OnClose, pencere kapanmadan önce tetiklenecek fonksiyonu kayıt eder.
-func (w *Window) OnClose(callback func()) {
-	w.mu.Lock()
-	w.onClose = callback
-	w.mu.Unlock()
+// GetSize returns the window size.
+// -----------------------------------------------------------------------------
+// Mevcut pencerenin client area genişlik ve yüksekliğini döndürür.
+func (w *Window) GetSize() (width, height int) {
+	var rect RECT
+	GetClientRect(w.hwnd, &rect)
+	return int(rect.Width()), int(rect.Height())
 }
 
-// OnMouseMove, fare hareketi olduğunda çağrılacak callback'i kayıt eder.
-func (w *Window) OnMouseMove(callback func(x, y int)) {
-	w.mu.Lock()
-	w.onMouseMove = callback
-	w.mu.Unlock()
-}
-
-// OnClick, mouse tıklaması algılandığında tetiklenecek fonksiyonu kayıt eder.
-func (w *Window) OnClick(callback func(x, y int, button platform.MouseButton)) {
-	w.mu.Lock()
-	w.onClick = callback
-	w.mu.Unlock()
-}
-
-// OnKeyDown, klavyede bir tuşa basıldığında tetiklenecek fonksiyonu kayıt eder.
-func (w *Window) OnKeyDown(callback func(keyCode int)) {
-	w.mu.Lock()
-	w.onKeyDown = callback
-	w.mu.Unlock()
-}
-
-// OnKeyUp, klavyede basılı tuş bırakıldığında tetiklenecek fonksiyonu kayıt eder.
-func (w *Window) OnKeyUp(callback func(keyCode int)) {
-	w.mu.Lock()
-	w.onKeyUp = callback
-	w.mu.Unlock()
-}
-
-// Show, oluşturulmuş pencereyi ekranda görünür hale getirir.
-func (w *Window) Show() {
-	if w.hwnd != 0 {
-		procShowWindow.Call(uintptr(w.hwnd), SW_SHOW)
-	}
-}
-
-// Close, pencereyi kapatır ve DestroyWindow tetikler.
-func (w *Window) Close() {
-	if w.hwnd != 0 {
-		procDestroyWindow.Call(uintptr(w.hwnd))
-	}
-}
-
-// Run, pencereyi oluşturur ve sonsuz mesaj döngüsünü başlatır.
-// Uygulama bu fonksiyonda yaşar, kullanıcı kapatınca sona erer.
-func (w *Window) Run() {
-	activeWindow = w
-
-	className := StringToUTF16Ptr("GOMAD_WINDOW_CLASS")
-
-	hInstance, _, _ := procGetModuleHandle.Call(0)
-	cursor, _, _ := procLoadCursor.Call(0, IDC_ARROW)
-
-	wndClass := WNDCLASSEX{
-		Style:         CS_HREDRAW | CS_VREDRAW,
-		LpfnWndProc:   syscall.NewCallback(wndProc),
-		HInstance:     HINSTANCE(hInstance),
-		HCursor:       HCURSOR(cursor),
-		HbrBackground: HBRUSH(COLOR_WINDOW + 1),
-		LpszClassName: className,
-	}
-	wndClass.CbSize = wndClass.Size()
-
-	procRegisterClassEx.Call(uintptr(unsafe.Pointer(&wndClass)))
-
-	// 2. Pencere oluşturma
-	hwnd, _, _ := programCreateWindowEx.Call(
-		0,
-		uintptr(unsafe.Pointer(className)),
-		uintptr(unsafe.Pointer(StringToUTF16Ptr(w.title))),
-		WS_OVERLAPPEDWINDOW,
-		CW_USEDEFAULT,
-		CW_USEDEFAULT,
-		uintptr(w.width),
-		uintptr(w.height),
-		0,
-		0,
-		hInstance,
-		0,
-	)
-
-	w.hwnd = HWND(hwnd)
-
-	w.Show()
-
-	var msg MSG
-	for {
-		ret, _, _ := procGetMessage.Call(
-			uintptr(unsafe.Pointer(&msg)),
-			0, 0, 0,
-		)
-
-		if ret == 0 {
-			break
-		}
-
-		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
-		procDispatchMessage.Call(uintptr(unsafe.Pointer(&msg)))
-	}
-}
-
-// SetPosition, pencerenin boyutunu değiştirmeden ekrandaki konumunu belirtilen x ve y koordinatlarına ayarlar.
+// SetPosition sets the window position.
+// -----------------------------------------------------------------------------
+// Pencereyi belirtilen (x,y) koordinatına taşır. Mevcut boyut korunur.
 func (w *Window) SetPosition(x, y int) {
-	if w.hwnd != 0 {
-		const SWP_NOSIZE = 0x0001
-		const SWP_NOZORDER = 0x0004
-		procSetWindowPos.Call(
-			uintptr(w.hwnd),
-			0,
-			uintptr(x), uintptr(y),
-			0, 0,
-			SWP_NOSIZE|SWP_NOZORDER,
-		)
-	}
+	width, height := w.GetSize()
+	MoveWindow(w.hwnd, int32(x), int32(y), int32(width), int32(height), true)
 }
 
-// GetPosition pencerenin ekran koordinatlarındaki geçerli konumunu (x, y) olarak döndürür.
+// GetPosition returns the window position.
+// -----------------------------------------------------------------------------
+// Ekrandaki mevcut sol-üst koordinatları döner (pencere dış sınırı).
 func (w *Window) GetPosition() (x, y int) {
-	if w.hwnd != 0 {
-		var rect RECT
-		procGetWindowRect.Call(
-			uintptr(w.hwnd),
-			uintptr(unsafe.Pointer(&rect)),
-		)
-		return int(rect.Left), int(rect.Top)
-	}
-	return 0, 0
+	var rect RECT
+	GetWindowRect(w.hwnd, &rect)
+	return int(rect.Left), int(rect.Top)
 }
 
-// Center, pencereyi ekranın ortasına taşır.
+// Center centers the window on the screen.
+// -----------------------------------------------------------------------------
+// Ekran çözünürlüğünü alır, pencere boyutunu hesaplar ve merkezi koordinata taşır.
 func (w *Window) Center() {
-	if w.hwnd == 0 {
-		return
-	}
-
-	screenWidth, _, _ := procGetSystemMetrics.Call(SM_CXSCREEN)
-	screenHeight, _, _ := procGetSystemMetrics.Call(SM_CYSCREEN)
+	screenWidth := GetSystemMetrics(SM_CXSCREEN)
+	screenHeight := GetSystemMetrics(SM_CYSCREEN)
 
 	var rect RECT
-	procGetWindowRect.Call(
-		uintptr(w.hwnd),
-		uintptr(unsafe.Pointer(&rect)),
-	)
-	windowWidth := int(rect.Right - rect.Left)
-	windowHeight := int(rect.Bottom - rect.Top)
+	GetWindowRect(w.hwnd, &rect)
 
-	x := (int(screenWidth) - windowWidth) / 2
-	y := (int(screenHeight) - windowHeight) / 2
+	winWidth := rect.Width()
+	winHeight := rect.Height()
 
-	w.SetPosition(x, y)
+	x := (screenWidth - winWidth) / 2
+	y := (screenHeight - winHeight) / 2
+
+	MoveWindow(w.hwnd, x, y, winWidth, winHeight, true)
 }
 
-// wndProc, WinAPI mesajlarının işlendiği kalp fonksiyondur.
-// Mouse, close, destroy gibi tüm event’ler buradan geçer.
-func wndProc(hwnd HWND, msg uint32, wParam WPARAM, lParam LPARAM) LRESULT {
-	w := activeWindow
-	if w == nil {
-		ret, _, _ := procDefWindowProc.Call(
-			uintptr(hwnd), uintptr(msg), uintptr(wParam), uintptr(lParam),
-		)
-		return LRESULT(ret)
+// ==================== State ====================
+
+// SetResizable enables or disables resizing.
+// -----------------------------------------------------------------------------
+// Boyutlandırma desteğini açar/kapatır. Şu an stil güncellemesi TODO olarak
+// bırakılmıştır; runtime'da stil değişimi yapmak için GetWindowLong/SetWindowLong
+// ve SetWindowPos(SWP_FRAMECHANGED) çağrıları gereklidir.
+func (w *Window) SetResizable(resizable bool) {
+	w.mu.Lock()
+	w.resizable = resizable
+	w.mu.Unlock()
+
+	// TODO: Update window style
+}
+
+// IsResizable returns whether resizing is enabled.
+// -----------------------------------------------------------------------------
+// Mevcut resizable durumunu thread-safe şekilde döner.
+func (w *Window) IsResizable() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.resizable
+}
+
+// Minimize minimizes the window.
+// -----------------------------------------------------------------------------
+// Pencereyi görev çubuğuna/dock'a küçültür.
+func (w *Window) Minimize() {
+	ShowWindow(w.hwnd, SW_MINIMIZE)
+}
+
+// Maximize maximizes the window.
+// -----------------------------------------------------------------------------
+// Pencereyi tam ekran ya da maksimum kullanılabilir alan olacak şekilde büyütür.
+func (w *Window) Maximize() {
+	ShowWindow(w.hwnd, SW_MAXIMIZE)
+}
+
+// Restore restores the window.
+// -----------------------------------------------------------------------------
+// Minimize veya Maximize durumundan pencereyi orijinal haline getirir.
+func (w *Window) Restore() {
+	ShowWindow(w.hwnd, SW_RESTORE)
+}
+
+// ==================== Events ====================
+
+// OnClose sets the close callback.
+// -----------------------------------------------------------------------------
+// Pencere kapanmadan önce çağrılacak fonksiyonu atar. Fonksiyon `bool` dönerse
+// `false` durumda kapanma iptal edilebilir.
+func (w *Window) OnClose(callback func() bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onClose = callback
+}
+
+// OnResize sets the resize callback.
+// -----------------------------------------------------------------------------
+// Pencere boyutu değiştiğinde tetiklenecek callback'i atar.
+func (w *Window) OnResize(callback func(width, height int)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onResize = callback
+}
+
+// OnMove sets the move callback.
+// -----------------------------------------------------------------------------
+// Pencere taşındığında çağrılacak callback'i atar.
+func (w *Window) OnMove(callback func(x, y int)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onMove = callback
+}
+
+// OnFocus sets the focus callback.
+// -----------------------------------------------------------------------------
+// Pencere odaklandığında çağrılacak callback'i atar.
+func (w *Window) OnFocus(callback func()) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onFocus = callback
+}
+
+// OnBlur sets the blur callback.
+// -----------------------------------------------------------------------------
+// Pencere odağını kaybettiğinde çağrılacak callback'i atar.
+func (w *Window) OnBlur(callback func()) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onBlur = callback
+}
+
+// ==================== Native ====================
+
+// Handle returns the native window handle (HWND).
+// -----------------------------------------------------------------------------
+// Native handle (HWND) pointer'ını uintptr formatında döner. Gömülü native API'ler,
+// OpenGL/DirectX entegrasyonları veya WebView bağlamları için gereklidir.
+func (w *Window) Handle() uintptr {
+	return uintptr(w.hwnd)
+}
+
+// ==================== Message Loop ====================
+
+// Run starts the Windows message loop.
+// Bu fonksiyon pencere kapanana kadar bloklar.
+// -----------------------------------------------------------------------------
+// Mesaj döngüsünü başlatır: GetMessage blocking olarak mesaj bekler; WM_QUIT
+// geldiğinde döngü sonlanır. Döngü sırasında TranslateMessage ve DispatchMessage
+// ile uygun window procedure'lar tetiklenir.
+func (w *Window) Run() {
+	var msg MSG
+	for {
+		ret := GetMessage(&msg, 0, 0, 0)
+		if ret == 0 {
+			break // WM_QUIT
+		}
+		if ret == -1 {
+			break // Error
+		}
+		TranslateMessage(&msg)
+		DispatchMessage(&msg)
 	}
-
-	switch msg {
-	case WM_CLOSE:
-		if w.onClose != nil {
-			w.onClose()
-		}
-		procDestroyWindow.Call(uintptr(hwnd))
-		return 0
-
-	case WM_DESTROY:
-		procPostQuitMessage.Call(0)
-		return 0
-
-	case WM_MOUSEMOVE:
-		if w.onMouseMove != nil {
-			x := GET_X_LPARAM(lParam)
-			y := GET_Y_LPARAM(lParam)
-			w.onMouseMove(x, y)
-		}
-		return 0
-
-	case WM_LBUTTONDOWN:
-		if w.onClick != nil {
-			x := GET_X_LPARAM(lParam)
-			y := GET_Y_LPARAM(lParam)
-			w.onClick(x, y, platform.MouseButtonLeft)
-		}
-		return 0
-
-	case WM_RBUTTONDOWN:
-		if w.onClick != nil {
-			x := GET_X_LPARAM(lParam)
-			y := GET_Y_LPARAM(lParam)
-			w.onClick(x, y, platform.MouseButtonRight)
-		}
-		return 0
-
-	case WM_MBUTTONDOWN:
-		if w.onClick != nil {
-			x := GET_X_LPARAM(lParam)
-			y := GET_Y_LPARAM(lParam)
-			w.onClick(x, y, platform.MouseButtonMiddle)
-		}
-		return 0
-
-	case WM_KEYDOWN:
-		if w.onKeyDown != nil {
-			keyCode := int(wParam)
-			w.onKeyDown(keyCode)
-		}
-		return 0
-
-	case WM_KEYUP:
-		if w.onKeyUp != nil {
-			keyCode := int(wParam)
-			w.onKeyUp(keyCode)
-		}
-		return 0
-	}
-
-	ret, _, _ := procDefWindowProc.Call(
-		uintptr(hwnd), uintptr(msg), uintptr(wParam), uintptr(lParam),
-	)
-	return LRESULT(ret)
 }
