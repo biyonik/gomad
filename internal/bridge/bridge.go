@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 )
@@ -124,6 +125,12 @@ func (b *Bridge) IsBound(name string) bool { return b.registry.Has(name) }
 // ListBindings() → tüm kayıtlı fonksiyonları listeler
 // ------------------------------------------------------------
 func (b *Bridge) ListBindings() []string { return b.registry.List() }
+
+// Registry returns the bridge registry instance.
+// Public erişim için getter.
+func (b *Bridge) Registry() *Registry {
+	return b.registry
+}
 
 // ============================================================
 // MESSAGE HANDLING
@@ -248,6 +255,13 @@ func (b *Bridge) IsInitialized() bool {
 func (b *Bridge) generateMsgID() string {
 	id := atomic.AddUint64(&b.msgIDCounter, 1)
 	return fmt.Sprintf("gomad_%d", id)
+}
+
+// GenerateTSDefinitions, frontend için .d.ts dosyasını belirtilen yola yazar.
+// Bu fonksiyon main.go içinden çağrılabilir.
+func (b *Bridge) GenerateTSDefinitions(path string) error {
+	defs := b.registry.GenerateTypeDefinitions()
+	return os.WriteFile(path, []byte(defs), 0644)
 }
 
 // ============================================================

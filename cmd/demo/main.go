@@ -19,6 +19,14 @@ import (
 	"github.com/biyonik/gomad/internal/webview"
 )
 
+type User struct {
+	ID        int       `json:"id"`
+	Username  string    `json:"username"`
+	Email     string    `json:"email"`
+	CreatedAt time.Time `json:"created_at"`
+	IsActive  bool      `json:"is_active"`
+}
+
 func main() {
 	log.Println("GOMAD Hello World Example")
 	log.Println("==========================")
@@ -55,14 +63,8 @@ func main() {
 	})
 
 	// 4. Karmaşık tip dönen fonksiyon
-	bridge.Bind("getUser", func(id int) map[string]interface{} {
-		log.Printf("[Go] getUser called with: %d", id)
-		return map[string]interface{}{
-			"id":       id,
-			"name":     "Ahmet",
-			"email":    "ahmet@example.com",
-			"isActive": true,
-		}
+	bridge.Bind("getUser", func(id int) User {
+		return User{ID: id, Username: "biyonik", CreatedAt: time.Now()}
 	})
 
 	// 5. Hata dönebilen fonksiyon
@@ -433,6 +435,14 @@ func main() {
 			"time":    time.Now().Format("15:04:05"),
 		})
 	}()
+
+	// TypeScript çıktısını oluştur
+	// Bunu production build'de değil, dev modda çalıştırın.
+	if err := bridge.GenerateTSDefinitions("gomad.d.ts"); err != nil {
+		log.Printf("Failed to generate TS definitions: %v", err)
+	} else {
+		log.Println("TypeScript definitions generated: gomad.d.ts ✅")
+	}
 
 	// Event loop başlat
 	wv.Run()
